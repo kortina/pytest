@@ -1,9 +1,11 @@
 """Core implementation of the testing process: init, session, runtest loop."""
 import argparse
+import ast
 import fnmatch
 import functools
 import importlib
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Callable
@@ -116,9 +118,7 @@ def pytest_addoption(parser: Parser) -> None:
         help="markers not registered in the `markers` section of the configuration file raise errors.",
     )
     group._addoption(
-        "--strict",
-        action="store_true",
-        help="(deprecated) alias to --strict-markers.",
+        "--strict", action="store_true", help="(deprecated) alias to --strict-markers.",
     )
     group._addoption(
         "-c",
@@ -473,6 +473,7 @@ class Session(nodes.FSCollector):
         self.trace = config.trace.root.get("collection")
         self.startdir = config.invocation_dir
         self._initialpaths: FrozenSet[Path] = frozenset()
+        self._file_line_numbers: Dict[str, List[int]] = collections.defaultdict(list)
 
         self._bestrelpathcache: Dict[Path, str] = _bestrelpath_cache(config.rootpath)
 
@@ -641,7 +642,12 @@ class Session(nodes.FSCollector):
             else:
                 if rep.passed:
                     for node in rep.result:
-                        self.items.extend(self.genitems(node))
+                        _items = self.genitems(node)
+                        if node.fspath in self._file_line_numbers:
+                            _items = _filter_items_by_line_numbers(
+                                _items, self._file_line_numbers[node.fspath]
+                            )
+                        self.items.extend(_items)
 
             self.config.pluginmanager.check_pending()
             hook.pytest_collection_modifyitems(
@@ -834,6 +840,21 @@ def search_pypath(module_name: str) -> str:
         return os.path.dirname(spec.origin)
     else:
         return spec.origin
+
+
+def _split_line_num(path: str) -> Tuple[str, Optional[int]]:
+    path = str(path)
+    match = re.search(_PATH_WITH_LINENUM_PATTERN, path)
+    line_num: Optional[int]
+
+    if match:
+        line_num = int(match.group("line"))
+        path = path[: match.start()]
+
+    return path, line_num
+
+
+_PATH_WITH_LINENUM_PATTERN = re.compile(r":(?P<line>\d+)$")
 
 
 def resolve_collection_argument(
