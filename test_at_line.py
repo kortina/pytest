@@ -1,5 +1,12 @@
+#!/usr/bin/env python3
 import ast
 import re
+from typing import Any, Optional, Pattern
+
+
+def _log(msg: str):
+    if True:
+        print(msg)
 
 
 class MethodFinder(ast.NodeVisitor):
@@ -25,13 +32,39 @@ class MethodFinder(ast.NodeVisitor):
         super(MethodFinder, self).generic_visit(node)
 
 
-def test_at_line(test_file, linenum):
+def test_at_line(
+    test_file: str, linenum: int, test_pattern: Optional[Pattern[Any]] = None
+):
     with open(test_file, "r") as f:
         ast_node = ast.parse(f.read())
-    finder = MethodFinder(linenum, conf.testMatch)
+    finder = MethodFinder(linenum, test_pattern)
     finder.visit(ast_node)
     matched_function = finder.matched_function
     while matched_function is None and linenum > 0:
         linenum -= 1
         matched_function = finder.function_lines.get(linenum)
-    log.info("Matched function: %s with line %d" % (matched_function, options.linenum))
+    return matched_function
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="""Given a test_file:linenum, such as,
+        testing/test_assertion.py:73
+        return the name of the test at that line:
+        `test_rewrite_assertions_pytester_plugin`
+    """
+    )
+    parser.add_argument(
+        "file_and_line", type=str, help="file_and_line", default=None,
+    )
+    args = parser.parse_args()
+    test_file, linenum = args.file_and_line.split(":")
+    pattern = None
+    matched_function = test_at_line(test_file, int(linenum), pattern)
+    _log(f"Matched function: {matched_function} at {test_file}:{linenum}")
+
+
+if __name__ == "__main__":
+    main()
