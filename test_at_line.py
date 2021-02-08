@@ -4,9 +4,10 @@ import re
 from typing import Any, Optional, Pattern
 
 
-def _log(msg: str):
+def _log(msg: str) -> None:
     if True:
         print(msg)
+    return ""
 
 
 class MethodFinder(ast.NodeVisitor):
