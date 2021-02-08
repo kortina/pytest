@@ -1,9 +1,12 @@
 """Core implementation of the testing process: init, session, runtest loop."""
 import argparse
+import ast
+import collections
 import fnmatch
 import functools
 import importlib
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Callable
@@ -116,9 +119,7 @@ def pytest_addoption(parser: Parser) -> None:
         help="markers not registered in the `markers` section of the configuration file raise errors.",
     )
     group._addoption(
-        "--strict",
-        action="store_true",
-        help="(deprecated) alias to --strict-markers.",
+        "--strict", action="store_true", help="(deprecated) alias to --strict-markers.",
     )
     group._addoption(
         "-c",
@@ -473,6 +474,7 @@ class Session(nodes.FSCollector):
         self.trace = config.trace.root.get("collection")
         self.startdir = config.invocation_dir
         self._initialpaths: FrozenSet[Path] = frozenset()
+        self._file_line_numbers: Dict[str, List[int]] = collections.defaultdict(list)
 
         self._bestrelpathcache: Dict[Path, str] = _bestrelpath_cache(config.rootpath)
 
@@ -641,7 +643,12 @@ class Session(nodes.FSCollector):
             else:
                 if rep.passed:
                     for node in rep.result:
-                        self.items.extend(self.genitems(node))
+                        _items = self.genitems(node)
+                        if node.fspath in self._file_line_numbers:
+                            _items = _filter_items_by_line_numbers(
+                                _items, self._file_line_numbers[node.fspath]
+                            )
+                        self.items.extend(_items)
 
             self.config.pluginmanager.check_pending()
             hook.pytest_collection_modifyitems(
@@ -818,6 +825,96 @@ class Session(nodes.FSCollector):
                     yield from self.genitems(subnode)
             node.ihook.pytest_collectreport(report=rep)
 
+    # -------------------------------------------
+    def _filter_by_line(self, path):
+        PATTERN_LINE = re.compile(r":(?P<line>[0-9]+)$")
+
+        path = str(path)
+        match = re.search(PATTERN_LINE, path)
+
+        if match:
+            self.file_line = path[match.start() + 1 : match.end()]
+            path = path[: match.start()]
+        path = self.config.invocation_dir.join(path, abs=True)
+        if not path.check():
+            raise UsageError()
+
+        return path
+
+    def _find_nearest_test_function(self, items):
+        """
+        Finds the nearest test function given a path in the form:
+        path/to/test.py:12
+        With ``12`` being a line number, search upwards or downwards in the file
+                until it finds a test function declaration.
+        :return: a filtered item list
+        """
+
+        items = sorted(items, key=lambda x: x.location)
+        mid = self._find_nearest_point_to_line(items)
+        return self._find_all_items_nearest_to_point(items, mid)
+
+    def _find_nearest_point_to_line(self, items):
+        """
+        Find nearest index of items list to file line
+        :param items:
+        :return: index of item list nearest to file line
+        """
+        line = int(self.file_line) - 1
+        mid = 0
+        lo = 0
+        hi = len(items)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            midval = items[mid].location[1]
+            next_to_midval = (
+                items[mid + 1].location[1]
+                if len(items) > mid + 1
+                else items[mid].location[1]
+            )
+            if line not in list(range(midval, next_to_midval)):
+                if midval < line:
+                    lo = mid + 1
+                elif midval > line:
+                    hi = mid
+                else:
+                    return mid
+            else:
+                return mid
+        return mid
+
+    def _find_all_items_nearest_to_point(self, items, point):
+        """
+        Find all items where location is equal as location of item[point]
+        :param items: items list
+        :param point: index of items list
+        :return: filtered items list
+        """
+        if not items:
+            return []
+        items_list = [items[point]]
+        loc = items[point].location[1]
+        start_point = point
+        up = True
+        down = True
+
+        while up or down:
+            if down:
+                point += 1
+                if point < len(items) and items[point].location[1] == loc:
+                    items_list.append(items[point])
+                else:
+                    point = start_point
+                    down = False
+            elif up:
+                point -= 1
+                if point > 0 and items[point].location[1] == loc:
+                    items_list.append(items[point])
+                else:
+                    point = start_point
+                    up = False
+        return items_list
+
 
 def search_pypath(module_name: str) -> str:
     """Search sys.path for the given a dotted module name, and return its file system path."""
@@ -834,6 +931,28 @@ def search_pypath(module_name: str) -> str:
         return os.path.dirname(spec.origin)
     else:
         return spec.origin
+
+
+def _split_line_num(path: str) -> Tuple[str, Optional[int]]:
+    path = str(path)
+    match = re.search(_PATH_WITH_LINENUM_PATTERN, path)
+    line_num: Optional[int]
+
+    if match:
+        line_num = int(match.group("line"))
+        path = path[: match.start()]
+
+    return path, line_num
+
+
+_PATH_WITH_LINENUM_PATTERN = re.compile(r":(?P<line>\d+)$")
+
+
+def _filter_items_by_line_numbers(
+    items: Sequence[Union[nodes.Item, nodes.Collector]], line_numbers
+) -> Sequence[Union[nodes.Item, nodes.Collector]]:
+    __import__("pdb").set_trace()  # FIXME
+    return items
 
 
 def resolve_collection_argument(
